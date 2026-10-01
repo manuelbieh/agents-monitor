@@ -200,6 +200,7 @@
     <select id="provider">
       <option value="claude">Claude</option>
       <option value="codex">Codex</option>
+      <option value="grok">Grok</option>
     </select>
     <input id="config-dir" list="candidates" placeholder="~/.claude-other" autocomplete="off" spellcheck="false">
     <datalist id="candidates"></datalist>
@@ -227,6 +228,7 @@
   const PROVIDERS = [
     { id: 'claude', name: 'Claude' },
     { id: 'codex', name: 'Codex' },
+    { id: 'grok', name: 'Grok' },
   ];
 
   const embedded = new URLSearchParams(location.search).has('embedded') && Boolean(window.webkit?.messageHandlers?.resize);
@@ -354,7 +356,7 @@
     const { accounts } = data;
 
     if (accounts.length === 0) {
-      accountsEl.innerHTML = '<div class="empty">No accounts yet. Add a Claude or Codex config directory to start monitoring.</div>';
+      accountsEl.innerHTML = '<div class="empty">No accounts yet. Add a Claude, Codex, or Grok config directory to start monitoring.</div>';
       footerEl.textContent = '';
       return;
     }

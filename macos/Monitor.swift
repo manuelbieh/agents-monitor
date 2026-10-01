@@ -10,11 +10,13 @@ let minManualRefresh: TimeInterval = 60
 enum Provider: String, CaseIterable {
     case claude
     case codex
+    case grok
 
     var displayName: String {
         switch self {
         case .claude: return "Claude"
         case .codex: return "Codex"
+        case .grok: return "Grok"
         }
     }
 
@@ -22,6 +24,7 @@ enum Provider: String, CaseIterable {
         switch self {
         case .claude: return home + "/.claude"
         case .codex: return home + "/.codex"
+        case .grok: return home + "/.grok"
         }
     }
 
@@ -30,6 +33,7 @@ enum Provider: String, CaseIterable {
         switch self {
         case .claude: return (".claude", "settings.json")
         case .codex: return (".codex", "auth.json")
+        case .grok: return (".grok", "auth.json")
         }
     }
 }
@@ -298,6 +302,95 @@ func codexLimits(_ body: [String: Any]) -> [Limit] {
     return limits
 }
 
+// MARK: - Grok
+
+struct GrokCredentials {
+    let accessToken: String
+    let email: String?
+    let expiresAt: Double?
+}
+
+// The grok CLI stores its OIDC login in <GROK config dir>/auth.json. The access
+// token is the "key" field. Refreshing it here would rotate the refresh token
+// behind the CLI, so an expired token waits for the next `grok` launch.
+func readGrokCredentials(for dir: String) -> GrokCredentials? {
+    guard let json = readJSON(dir + "/auth.json") else { return nil }
+    var best: (GrokCredentials, Double)?
+    for value in json.values {
+        guard let entry = value as? [String: Any],
+              let token = entry["key"] as? String, !token.isEmpty
+        else { continue }
+        let expiresAt = parseDate(entry["expires_at"] as? String).map { $0.timeIntervalSince1970 * 1000 }
+        let credentials = GrokCredentials(
+            accessToken: token,
+            email: entry["email"] as? String,
+            expiresAt: expiresAt
+        )
+        let rank = expiresAt ?? 0
+        if best == nil || rank > best!.1 { best = (credentials, rank) }
+    }
+    return best?.0
+}
+
+func grokRequest(token: String, path: String) -> URLRequest {
+    var request = URLRequest(url: URL(string: "https://cli-chat-proxy.grok.com/v1\(path)")!, timeoutInterval: 15)
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    // The CLI sends this header on every proxy call. The billing route checks it.
+    request.setValue("xai-grok-cli", forHTTPHeaderField: "X-XAI-Token-Auth")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    return request
+}
+
+func grokAmount(_ value: Any?) -> Double? {
+    if let number = value as? NSNumber { return number.doubleValue }
+    guard let object = value as? [String: Any] else { return nil }
+    return (object["val"] as? NSNumber)?.doubleValue
+}
+
+/// The CLI's billing proxy. `creditUsagePercent` is the shared weekly pool
+/// (0–100). Product rows are shares of that same pool, so they are not separate
+/// limits. A missing percent with a period still means 0%, which is what
+/// `/usage` shows right after a reset.
+func grokLimits(_ body: [String: Any]) -> [Limit] {
+    let config = body["config"] as? [String: Any] ?? body
+    let period = config["currentPeriod"] as? [String: Any]
+    let periodType = (period?["type"] as? String) ?? ""
+    let resetsAt = (period?["end"] as? String) ?? (config["billingPeriodEnd"] as? String)
+    let monthly = periodType.contains("MONTH")
+    let poolLabel = monthly ? "Monthly limit" : "Weekly limit"
+
+    var limits: [Limit] = []
+    if let used = grokAmount(config["creditUsagePercent"]) {
+        limits.append(Limit(kind: "weekly_all", label: poolLabel, usedPercent: used, resetsAt: resetsAt))
+    } else if let cap = grokAmount(config["monthlyLimit"]), cap > 0, let used = grokAmount(config["used"]) {
+        limits.append(Limit(kind: "weekly_all", label: "Monthly limit", usedPercent: used / cap * 100, resetsAt: resetsAt))
+    } else if resetsAt != nil {
+        limits.append(Limit(kind: "weekly_all", label: poolLabel, usedPercent: 0, resetsAt: resetsAt))
+    }
+
+    if let cap = grokAmount(config["onDemandCap"]), cap > 0 {
+        let used = grokAmount(config["onDemandUsed"]) ?? 0
+        limits.append(Limit(kind: "weekly_scoped", label: "On-demand", usedPercent: used / cap * 100, resetsAt: resetsAt))
+    }
+    return limits
+}
+
+func grokPlan(token: String) -> String? {
+    let request = grokRequest(token: token, path: "/settings")
+    let semaphore = DispatchSemaphore(value: 0)
+    var plan: String?
+    URLSession.shared.dataTask(with: request) { data, response, _ in
+        defer { semaphore.signal() }
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let data,
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+        plan = body["subscription_tier_display"] as? String
+    }.resume()
+    _ = semaphore.wait(timeout: .now() + 20)
+    return plan
+}
+
 // MARK: - Monitor
 
 /// A ready-to-send usage request, or the reason one can't be made right now.
@@ -357,7 +450,22 @@ final class Monitor {
             account.nextFetchAt = now.addingTimeInterval(Double(index) * 2)
             accounts.append(account)
         }
+        ensureDefaultGrokAccount()
         saveAccounts()
+    }
+
+    /// Adds ~/.grok the first time a login is found. Removing it sticks.
+    private var grokDefaultMarker: URL { supportDir.appendingPathComponent("grok-default-added") }
+
+    private func ensureDefaultGrokAccount() {
+        let dir = Provider.grok.defaultConfigDir
+        guard !FileManager.default.fileExists(atPath: grokDefaultMarker.path) else { return }
+        guard FileManager.default.fileExists(atPath: dir + "/auth.json") else { return }
+        FileManager.default.createFile(atPath: grokDefaultMarker.path, contents: Data())
+        guard !accounts.contains(where: { $0.provider == .grok && $0.configDir == dir }) else { return }
+        let account = Account(provider: .grok, configDir: dir)
+        account.nextFetchAt = Date().addingTimeInterval(Double(accounts.count) * 2)
+        accounts.append(account)
     }
 
     private func saveAccounts() {
@@ -393,9 +501,12 @@ final class Monitor {
         guard account(for: dir) == nil else { return completion("Account already added") }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let hasCredentials = provider == .claude
-                ? readClaudeCredentials(for: dir) != nil
-                : readCodexCredentials(for: dir) != nil
+            let hasCredentials: Bool
+            switch provider {
+            case .claude: hasCredentials = readClaudeCredentials(for: dir) != nil
+            case .codex: hasCredentials = readCodexCredentials(for: dir) != nil
+            case .grok: hasCredentials = readGrokCredentials(for: dir) != nil
+            }
             DispatchQueue.main.async {
                 guard hasCredentials else {
                     return completion("No \(provider.displayName) login found for \(collapseHome(dir))")
@@ -514,6 +625,18 @@ final class Monitor {
                 }
                 return codexLimits(body)
             }
+
+        case .grok:
+            guard let credentials = readGrokCredentials(for: dir) else {
+                return .failed("No login found in auth.json", retryIn: pollInterval)
+            }
+            DispatchQueue.main.async { account.email = credentials.email ?? account.email }
+            if let expiresAt = credentials.expiresAt, expiresAt < nowMilliseconds() {
+                return .failed("Token expired, start Grok to renew it", retryIn: 60)
+            }
+            let plan = grokPlan(token: credentials.accessToken)
+            DispatchQueue.main.async { account.plan = plan ?? account.plan }
+            return .ready(grokRequest(token: credentials.accessToken, path: "/billing?format=credits"), parse: grokLimits)
         }
     }
 
@@ -546,7 +669,11 @@ final class Monitor {
                     return fail(status == 401 ? "Token rejected (401)" : "Usage request failed (\(status))")
                 }
 
-                account.limits = parse(body)
+                let limits = parse(body)
+                if account.provider == .grok && limits.isEmpty {
+                    return fail("Usage response had no limit")
+                }
+                account.limits = limits
                 account.fetchedAt = nowMilliseconds()
                 account.error = nil
                 account.backoff = pollInterval

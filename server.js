@@ -14,6 +14,9 @@ const PORT = Number(process.env.PORT) || 4747;
 const HOME = homedir();
 const DEFAULT_CONFIG_DIR = path.join(HOME, '.claude');
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const GROK_DEFAULT_DIR = path.join(HOME, '.grok');
+const GROK_BILLING_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits';
+const GROK_SETTINGS_URL = 'https://cli-chat-proxy.grok.com/v1/settings';
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
@@ -26,15 +29,20 @@ const normalizeDir = (p) => path.resolve(expandHome(p.trim())).replace(/\/+$/, '
 // ---------- persistence ----------
 
 function loadAccounts() {
-  if (!existsSync(ACCOUNTS_FILE)) return [DEFAULT_CONFIG_DIR];
-  // The browser version only speaks to Claude; Codex accounts are handled by the macOS app.
-  return JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf8'))
-    .filter((a) => (a.provider ?? 'claude') === 'claude')
-    .map((a) => normalizeDir(a.configDir));
+  const fallback = [{ provider: 'claude', configDir: DEFAULT_CONFIG_DIR }];
+  if (!existsSync(ACCOUNTS_FILE)) return fallback;
+  // Codex stays in the macOS app. Claude and Grok are polled here.
+  const saved = JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf8'))
+    .filter((a) => ['claude', 'grok'].includes(a.provider ?? 'claude'))
+    .map((a) => ({ provider: a.provider ?? 'claude', configDir: normalizeDir(a.configDir) }));
+  return saved.length > 0 ? saved : fallback;
 }
 
 function saveAccounts() {
-  const data = [...state.keys()].map((dir) => ({ provider: 'claude', configDir: collapseHome(dir) }));
+  const data = [...state.values()].map((entry) => ({
+    provider: entry.provider,
+    configDir: collapseHome(entry.configDir),
+  }));
   writeFileSync(ACCOUNTS_FILE, `${JSON.stringify(data, null, 2)}\n`);
 }
 
@@ -102,8 +110,9 @@ function readProfile(dir) {
 
 const state = new Map();
 
-function createEntry(dir, cached) {
+function createEntry(provider, dir, cached) {
   return {
+    provider,
     configDir: dir,
     email: null,
     plan: null,
@@ -116,62 +125,175 @@ function createEntry(dir, cached) {
   };
 }
 
+function readGrokCredentials(dir) {
+  try {
+    const data = JSON.parse(readFileSync(path.join(dir, 'auth.json'), 'utf8'));
+    const entries = Object.values(data).filter((entry) => entry?.key);
+    entries.sort((a, b) => String(b.expires_at ?? '').localeCompare(String(a.expires_at ?? '')));
+    const entry = entries[0];
+    if (!entry) return null;
+    return { accessToken: entry.key, email: entry.email ?? null, expiresAt: entry.expires_at ?? null };
+  } catch {
+    return null;
+  }
+}
+
+function grokAmount(value) {
+  if (typeof value === 'number') return value;
+  if (value && typeof value.val === 'number') return value.val;
+  return null;
+}
+
+function grokLimits(body) {
+  const config = body.config ?? body;
+  const period = config.currentPeriod ?? {};
+  const periodType = period.type ?? '';
+  const resetsAt = period.end ?? config.billingPeriodEnd ?? null;
+  const poolLabel = periodType.includes('MONTH') ? 'Monthly limit' : 'Weekly limit';
+  const limits = [];
+
+  const creditUsed = grokAmount(config.creditUsagePercent);
+  const monthlyCap = grokAmount(config.monthlyLimit);
+  const monthlyUsed = grokAmount(config.used);
+  if (creditUsed != null) {
+    limits.push({ kind: 'weekly_all', label: poolLabel, usedPercent: creditUsed, resetsAt });
+  } else if (monthlyCap > 0 && monthlyUsed != null) {
+    limits.push({ kind: 'weekly_all', label: 'Monthly limit', usedPercent: (monthlyUsed / monthlyCap) * 100, resetsAt });
+  } else if (resetsAt) {
+    limits.push({ kind: 'weekly_all', label: poolLabel, usedPercent: 0, resetsAt });
+  }
+
+  const onDemandCap = grokAmount(config.onDemandCap);
+  if (onDemandCap > 0) {
+    const onDemandUsed = grokAmount(config.onDemandUsed) ?? 0;
+    limits.push({
+      kind: 'weekly_scoped',
+      label: 'On-demand',
+      usedPercent: (onDemandUsed / onDemandCap) * 100,
+      resetsAt,
+    });
+  }
+  return limits;
+}
+
 async function refresh(dir) {
   const entry = state.get(dir);
   if (!entry || entry.inFlight) return;
   entry.inFlight = true;
 
   try {
-    entry.email = readProfile(dir).email;
-    const creds = await readCredentials(dir);
-    if (!creds) {
-      entry.error = 'No credentials found in keychain';
-      entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
-      return;
-    }
-    entry.plan = creds.subscriptionType ?? null;
-
-    if (creds.expiresAt && creds.expiresAt < Date.now()) {
-      // Refreshing here would rotate the refresh token behind Claude Code's back.
-      entry.error = 'Token expired, start this Claude instance to renew it';
-      entry.nextFetchAt = Date.now() + 60 * 1000;
-      return;
-    }
-
-    const res = await fetch(USAGE_URL, {
-      headers: {
-        Authorization: `Bearer ${creds.accessToken}`,
-        'anthropic-beta': 'oauth-2025-04-20',
-        'Content-Type': 'application/json',
-      },
-      signal: AbortSignal.timeout(15000),
-    });
-
-    if (res.status === 429) {
-      entry.error = 'Rate limited, retrying later';
-      entry.backoffMs = Math.min(entry.backoffMs * 2, MAX_BACKOFF_MS);
-      entry.nextFetchAt = Date.now() + entry.backoffMs;
-      return;
-    }
-    if (!res.ok) {
-      entry.error = res.status === 401 ? 'Token rejected (401)' : `Usage request failed (${res.status})`;
-      entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
-      return;
-    }
-
-    const body = await res.json();
-    entry.limits = normalizeLimits(body);
-    entry.fetchedAt = Date.now();
-    entry.error = null;
-    entry.backoffMs = POLL_INTERVAL_MS;
-    entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
-    saveCache();
+    if (entry.provider === 'grok') await refreshGrok(entry);
+    else await refreshClaude(entry);
   } catch (err) {
     entry.error = `Request failed: ${err.message}`;
     entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
   } finally {
     entry.inFlight = false;
   }
+}
+
+async function refreshGrok(entry) {
+  const creds = readGrokCredentials(entry.configDir);
+  if (!creds) {
+    entry.error = 'No login found in auth.json';
+    entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
+    return;
+  }
+  entry.email = creds.email ?? entry.email;
+  if (creds.expiresAt && Date.parse(creds.expiresAt) < Date.now()) {
+    entry.error = 'Token expired, start Grok to renew it';
+    entry.nextFetchAt = Date.now() + 60 * 1000;
+    return;
+  }
+
+  const headers = {
+    Authorization: `Bearer ${creds.accessToken}`,
+    Accept: 'application/json',
+    'X-XAI-Token-Auth': 'xai-grok-cli',
+  };
+  const billingRes = await fetch(GROK_BILLING_URL, { headers, signal: AbortSignal.timeout(15000) });
+  try {
+    const settingsRes = await fetch(GROK_SETTINGS_URL, { headers, signal: AbortSignal.timeout(15000) });
+    if (settingsRes.ok) {
+      const settings = await settingsRes.json();
+      entry.plan = settings.subscription_tier_display ?? entry.plan;
+    }
+  } catch {
+    // The plan name is optional. A settings failure still leaves the usage bar.
+  }
+
+  if (billingRes.status === 429) {
+    entry.error = 'Rate limited, retrying later';
+    entry.backoffMs = Math.min(entry.backoffMs * 2, MAX_BACKOFF_MS);
+    entry.nextFetchAt = Date.now() + entry.backoffMs;
+    return;
+  }
+  if (!billingRes.ok) {
+    entry.error = billingRes.status === 401 ? 'Token rejected (401)' : `Usage request failed (${billingRes.status})`;
+    entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
+    return;
+  }
+
+  const limits = grokLimits(await billingRes.json());
+  if (limits.length === 0) {
+    entry.error = 'Usage response had no limit';
+    entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
+    return;
+  }
+  entry.limits = limits;
+  entry.fetchedAt = Date.now();
+  entry.error = null;
+  entry.backoffMs = POLL_INTERVAL_MS;
+  entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
+  saveCache();
+}
+
+async function refreshClaude(entry) {
+  const dir = entry.configDir;
+  entry.email = readProfile(dir).email;
+  const creds = await readCredentials(dir);
+  if (!creds) {
+    entry.error = 'No credentials found in keychain';
+    entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
+    return;
+  }
+  entry.plan = creds.subscriptionType ?? null;
+
+  if (creds.expiresAt && creds.expiresAt < Date.now()) {
+    // Refreshing here would rotate the refresh token behind Claude Code's back.
+    entry.error = 'Token expired, start this Claude instance to renew it';
+    entry.nextFetchAt = Date.now() + 60 * 1000;
+    return;
+  }
+
+  const res = await fetch(USAGE_URL, {
+    headers: {
+      Authorization: `Bearer ${creds.accessToken}`,
+      'anthropic-beta': 'oauth-2025-04-20',
+      'Content-Type': 'application/json',
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+
+  if (res.status === 429) {
+    entry.error = 'Rate limited, retrying later';
+    entry.backoffMs = Math.min(entry.backoffMs * 2, MAX_BACKOFF_MS);
+    entry.nextFetchAt = Date.now() + entry.backoffMs;
+    return;
+  }
+  if (!res.ok) {
+    entry.error = res.status === 401 ? 'Token rejected (401)' : `Usage request failed (${res.status})`;
+    entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
+    return;
+  }
+
+  const body = await res.json();
+  entry.limits = normalizeLimits(body);
+  entry.fetchedAt = Date.now();
+  entry.error = null;
+  entry.backoffMs = POLL_INTERVAL_MS;
+  entry.nextFetchAt = Date.now() + POLL_INTERVAL_MS;
+  saveCache();
 }
 
 function normalizeLimits(body) {
@@ -211,13 +333,15 @@ function tick() {
 
 // ---------- discovery ----------
 
-function discoverConfigDirs() {
+function discoverConfigDirs(provider) {
+  const prefix = provider === 'grok' ? '.grok' : '.claude';
+  const marker = provider === 'grok' ? 'auth.json' : 'settings.json';
   return readdirSync(HOME)
-    .filter((name) => name.startsWith('.claude'))
+    .filter((name) => name.startsWith(prefix))
     .map((name) => path.join(HOME, name))
     .filter((dir) => {
       try {
-        return statSync(dir).isDirectory() && existsSync(path.join(dir, 'settings.json'));
+        return statSync(dir).isDirectory() && existsSync(path.join(dir, marker));
       } catch {
         return false;
       }
@@ -232,6 +356,7 @@ function publicState() {
   return {
     now: Date.now(),
     accounts: [...state.values()].map((e) => ({
+      provider: e.provider,
       configDir: collapseHome(e.configDir),
       email: e.email,
       plan: e.plan,
@@ -268,19 +393,26 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/candidates') {
-      return send(res, 200, { candidates: discoverConfigDirs() });
+      const provider = url.searchParams.get('provider') === 'grok' ? 'grok' : 'claude';
+      return send(res, 200, { candidates: discoverConfigDirs(provider) });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/accounts') {
+      const provider = url.searchParams.get('provider') ?? 'claude';
+      if (provider !== 'claude' && provider !== 'grok') {
+        return send(res, 400, { error: 'This server supports Claude and Grok accounts' });
+      }
       const configDir = url.searchParams.get('configDir') ?? (await readBody(req)).configDir;
       if (!configDir) return send(res, 400, { error: 'configDir is required' });
       const dir = normalizeDir(configDir);
       if (!existsSync(dir)) return send(res, 400, { error: `${collapseHome(dir)} does not exist` });
       if (state.has(dir)) return send(res, 409, { error: 'Account already added' });
-      if (!(await readCredentials(dir))) {
-        return send(res, 400, { error: `No Claude Code credentials found for ${collapseHome(dir)}` });
+      const hasLogin = provider === 'grok' ? readGrokCredentials(dir) : await readCredentials(dir);
+      if (!hasLogin) {
+        const what = provider === 'grok' ? 'Grok login' : 'Claude Code credentials';
+        return send(res, 400, { error: `No ${what} found for ${collapseHome(dir)}` });
       }
-      state.set(dir, createEntry(dir));
+      state.set(dir, createEntry(provider, dir));
       saveAccounts();
       await refresh(dir);
       return send(res, 201, publicState());
@@ -309,7 +441,9 @@ const server = createServer(async (req, res) => {
 });
 
 const cache = loadCache();
-for (const dir of loadAccounts()) state.set(dir, createEntry(dir, cache[dir]));
+for (const account of loadAccounts()) {
+  state.set(account.configDir, createEntry(account.provider, account.configDir, cache[account.configDir]));
+}
 
 // Stagger the initial requests so accounts don't all hit the endpoint at once.
 [...state.values()].forEach((entry, i) => {
