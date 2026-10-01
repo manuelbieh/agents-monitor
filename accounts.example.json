@@ -1,0 +1,5 @@
+[
+  { "provider": "claude", "configDir": "~/.claude" },
+  { "provider": "claude", "configDir": "~/.claude-work" },
+  { "provider": "codex", "configDir": "~/.codex" }
+]

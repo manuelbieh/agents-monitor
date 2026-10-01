@@ -1,0 +1,13 @@
+{
+  "name": "agents-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Usage limits for every Claude Code and Codex login on this Mac",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

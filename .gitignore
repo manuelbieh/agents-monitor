@@ -1,0 +1,6 @@
+build/
+node_modules/
+.DS_Store
+# Local state: personal account list and cached usage data
+accounts.json
+.usage-cache.json

@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agents Monitor</title>
+<style>
+  :root {
+    --bg: #171615;
+    --divider: #2c2b29;
+    --track: #393836;
+    --text: #e8e6e3;
+    --text-muted: #8f8c88;
+    --text-dim: #6b6865;
+    --green: #22b77a;
+    --green-scoped: #1f8a5e;
+    --amber: #d9a13b;
+    --red: #e0533f;
+    --salmon: #f09a82;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  main { position: relative; padding: 40px 30px 60px; max-width: 1720px; }
+
+  .app-only { display: none; }
+  .embedded .app-only { display: inline-flex; }
+  .embedded body { overflow: hidden; }
+  .embedded main { padding: 26px 26px 18px; }
+  .embedded .account-name { font-size: 19px; }
+  .embedded .reset { font-size: 16px; }
+  .embedded header { top: 22px; right: 26px; }
+  .toggle {
+    align-items: center;
+    gap: 6px;
+    margin-right: 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .toggle input { accent-color: var(--green); margin: 0; }
+
+  /* Sits on the same line as the first section title. */
+  header {
+    position: absolute;
+    top: 36px;
+    right: 30px;
+    display: flex;
+    gap: 8px;
+  }
+
+  .provider + .provider { margin-top: 38px; }
+  .section-title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 0 0 22px;
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .section-title .count { color: var(--text-muted); font-size: 16px; font-weight: 400; }
+
+  button {
+    font: inherit;
+    font-size: 13px;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--divider);
+    border-radius: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  button:hover { color: var(--text); border-color: var(--track); }
+
+  .add-form {
+    display: none;
+    gap: 8px;
+    margin: 42px 0 26px;
+    align-items: center;
+  }
+  .add-form.open { display: flex; }
+  .add-form input, .add-form select {
+    font: 14px var(--mono);
+    color: var(--text);
+    background: #1f1e1c;
+    border: 1px solid var(--divider);
+    border-radius: 6px;
+    padding: 6px 10px;
+    width: 320px;
+  }
+  .add-form select { width: auto; font-family: var(--sans); }
+  .add-form input:focus, .add-form select:focus { outline: none; border-color: var(--text-dim); }
+  .add-form .error { color: var(--red); font-size: 13px; }
+
+  .row {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(260px, 1.4fr) repeat(var(--cols), minmax(200px, 1fr));
+    column-gap: 40px;
+    padding: 18px 0 17px;
+    border-bottom: 1px solid var(--divider);
+  }
+  .row:last-child { border-bottom: none; }
+
+  .account-name {
+    font: 700 21px/1.35 var(--mono);
+    letter-spacing: 0.01em;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .row.blocked .account-name { color: var(--text-muted); }
+
+  .account-meta {
+    margin-top: 8px;
+    font-size: 17px;
+    color: var(--text-muted);
+  }
+  .account-meta .back-in { color: var(--red); }
+  .account-meta .problem { color: var(--salmon); }
+
+  .remove {
+    position: absolute;
+    right: 0;
+    top: 6px;
+    padding: 0 6px;
+    border: none;
+    font-size: 16px;
+    opacity: 0;
+  }
+  .row:hover .remove { opacity: 1; }
+
+  .limit { font-size: 18px; }
+  .limit.scoped { opacity: 0.72; }
+  .limit.dim { opacity: 0.22; }
+
+  .limit-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    color: var(--text);
+  }
+  .limit.scoped .limit-head .label { color: var(--text-muted); }
+  .limit-head .percent { font-weight: 500; letter-spacing: 0.04em; }
+
+  .bar {
+    height: 6px;
+    margin: 13px 0 12px;
+    background: var(--track);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--green);
+    transition: width 0.4s ease;
+  }
+  .limit.scoped .bar-fill { background: var(--green-scoped); }
+  .bar-fill.low { background: var(--amber); }
+  .bar-fill.critical, .limit.scoped .bar-fill.critical { background: var(--red); }
+  .limit.dim .bar-fill { background: #77746f; }
+
+  .reset { color: var(--text-muted); font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .reset .relative { color: var(--text); }
+  .reset .relative.soon { color: var(--salmon); }
+  .limit.scoped .reset .relative { color: var(--text-muted); }
+
+  .empty { color: var(--text-muted); padding: 20px 0; }
+  .placeholder { color: var(--text-dim); font-size: 17px; align-self: center; }
+
+  footer {
+    margin-top: 24px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <label class="app-only toggle"><input type="checkbox" id="launch-at-login"> Launch at login</label>
+    <button id="refresh-button" type="button">Refresh</button>
+    <button id="add-button" type="button">+ Add account</button>
+    <button class="app-only" id="quit-button" type="button">Quit</button>
+  </header>
+
+  <form class="add-form" id="add-form">
+    <select id="provider">
+      <option value="claude">Claude</option>
+      <option value="codex">Codex</option>
+    </select>
+    <input id="config-dir" list="candidates" placeholder="~/.claude-other" autocomplete="off" spellcheck="false">
+    <datalist id="candidates"></datalist>
+    <button type="submit">Add</button>
+    <button type="button" id="cancel-add">Cancel</button>
+    <span class="error" id="add-error"></span>
+  </form>
+
+  <div id="accounts"></div>
+  <footer id="footer"></footer>
+</main>
+
+<script>
+  const accountsEl = document.getElementById('accounts');
+  const footerEl = document.getElementById('footer');
+  const addForm = document.getElementById('add-form');
+  const addInput = document.getElementById('config-dir');
+  const providerSelect = document.getElementById('provider');
+  const addError = document.getElementById('add-error');
+
+  const MINUTE = 60 * 1000;
+  const HOUR = 60 * MINUTE;
+  const DAY = 24 * HOUR;
+  const COLUMN_ORDER = { weekly_all: 0, session: 1, weekly_scoped: 2 };
+  const PROVIDERS = [
+    { id: 'claude', name: 'Claude' },
+    { id: 'codex', name: 'Codex' },
+  ];
+
+  const embedded = new URLSearchParams(location.search).has('embedded') && Boolean(window.webkit?.messageHandlers?.resize);
+  let data = { accounts: [] };
+
+  const escapeHtml = (s) =>
+    String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+  const pad = (n) => String(n).padStart(2, '0');
+
+  function formatDate(ts) {
+    const d = new Date(Math.round(ts / MINUTE) * MINUTE);
+    const weekday = d.toLocaleDateString('en-US', { weekday: 'short' });
+    return `${weekday} ${pad(d.getDate())}.${pad(d.getMonth() + 1)}. ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  // Never round to the largest unit: 70.5 hours must read "2d 22h", not "2 days".
+  function formatRelative(ms) {
+    if (ms < MINUTE) return 'in less than a minute';
+    return `in ${formatCompact(ms)}`;
+  }
+
+  function formatCompact(ms) {
+    const days = Math.floor(ms / DAY);
+    const hours = Math.floor((ms % DAY) / HOUR);
+    const minutes = Math.floor((ms % HOUR) / MINUTE);
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${Math.max(minutes, 1)}m`;
+  }
+
+  function formatAge(ms) {
+    if (ms < MINUTE) return 'just now';
+    if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m ago`;
+    return `${Math.floor(ms / HOUR)}h ago`;
+  }
+
+  function planLabel(account) {
+    const plan = account.plan;
+    if (!plan) return PROVIDERS.find((p) => p.id === (account.provider ?? 'claude'))?.name ?? '';
+    return plan.charAt(0).toUpperCase() + plan.slice(1);
+  }
+
+  function sortLimits(limits) {
+    return [...limits].sort((a, b) => (COLUMN_ORDER[a.kind] ?? 3) - (COLUMN_ORDER[b.kind] ?? 3));
+  }
+
+  function isExhausted(limit, now) {
+    return limit.usedPercent >= 100 && limit.resetsAt && Date.parse(limit.resetsAt) > now;
+  }
+
+  function renderLimit(limit, { now, blocked }) {
+    const remaining = Math.max(0, Math.min(100, Math.round(100 - limit.usedPercent)));
+    const exhausted = isExhausted(limit, now);
+    const classes = ['limit'];
+    if (limit.kind === 'weekly_scoped') classes.push('scoped');
+    if (blocked && !exhausted) classes.push('dim');
+
+    const fillClass = remaining <= 25 ? 'critical' : remaining <= 50 ? 'low' : '';
+
+    let reset = '<span>No reset pending</span>';
+    if (limit.resetsAt) {
+      const resetTs = Date.parse(limit.resetsAt);
+      const untilReset = Math.max(0, resetTs - now);
+      const soon = untilReset < HOUR ? ' soon' : '';
+      reset = `<span class="relative${soon}">${formatRelative(untilReset)}</span> · ${formatDate(resetTs)}`;
+    }
+
+    return `
+      <div class="${classes.join(' ')}">
+        <div class="limit-head">
+          <span class="label">${escapeHtml(limit.label)}</span>
+          <span class="percent">${remaining}%</span>
+        </div>
+        <div class="bar"><div class="bar-fill ${fillClass}" style="width:${remaining}%"></div></div>
+        <div class="reset">${reset}</div>
+      </div>`;
+  }
+
+  function renderAccount(account, now, columnCount) {
+    const limits = account.limits ? sortLimits(account.limits) : [];
+    const exhausted = limits.filter((l) => isExhausted(l, now));
+    const blocked = exhausted.length > 0;
+    // You're only back once every exhausted limit has reset.
+    const backAt = blocked ? Math.max(...exhausted.map((l) => Date.parse(l.resetsAt))) : null;
+
+    const meta = [escapeHtml(planLabel(account))];
+    if (blocked) meta.push(`<span class="back-in">back in ${formatCompact(backAt - now)}</span>`);
+    if (account.error) {
+      const stale = account.fetchedAt ? ` · data from ${formatAge(now - account.fetchedAt)}` : '';
+      meta.push(`<span class="problem">${escapeHtml(account.error)}${stale}</span>`);
+    }
+
+    let columns;
+    if (limits.length > 0) {
+      columns = limits.map((l) => renderLimit(l, { now, blocked })).join('');
+    } else {
+      const text = account.loading || !account.error ? 'Loading…' : 'No usage data yet';
+      columns = `<div class="placeholder" style="grid-column: span ${columnCount}">${text}</div>`;
+    }
+
+    const name = account.email ?? account.configDir;
+    return `
+      <div class="row${blocked ? ' blocked' : ''}">
+        <div>
+          <div class="account-name" title="${escapeHtml(account.configDir)}">${escapeHtml(name)}</div>
+          <div class="account-meta">${meta.join(' · ')}</div>
+        </div>
+        ${columns}
+        <button class="remove" type="button" title="Remove account" data-config-dir="${escapeHtml(account.configDir)}">×</button>
+      </div>`;
+  }
+
+  function renderSection(provider, accounts, now) {
+    const columnCount = Math.max(3, ...accounts.map((a) => a.limits?.length ?? 0));
+    return `
+      <section class="provider" style="--cols:${columnCount}">
+        <h2 class="section-title">${escapeHtml(provider.name)} <span class="count">${accounts.length}</span></h2>
+        ${accounts.map((a) => renderAccount(a, now, columnCount)).join('')}
+      </section>`;
+  }
+
+  function render() {
+    const now = Date.now();
+    const { accounts } = data;
+
+    if (accounts.length === 0) {
+      accountsEl.innerHTML = '<div class="empty">No accounts yet. Add a Claude or Codex config directory to start monitoring.</div>';
+      footerEl.textContent = '';
+      return;
+    }
+
+    accountsEl.innerHTML = PROVIDERS.map((provider) => {
+      const members = accounts.filter((a) => (a.provider ?? 'claude') === provider.id);
+      return members.length > 0 ? renderSection(provider, members, now) : '';
+    }).join('');
+
+    const fetched = accounts.map((a) => a.fetchedAt).filter(Boolean);
+    footerEl.textContent = fetched.length
+      ? `Updated ${formatAge(now - Math.min(...fetched))} · refreshes every 5 minutes`
+      : '';
+  }
+
+  async function load() {
+    try {
+      const res = await fetch('/api/state');
+      data = await res.json();
+      render();
+    } catch {
+      footerEl.textContent = 'Monitor server is not reachable';
+    }
+  }
+
+  async function loadCandidates() {
+    addInput.placeholder = `~/.${providerSelect.value}-other`;
+    const res = await fetch(`/api/candidates?provider=${providerSelect.value}`);
+    const { candidates } = await res.json();
+    document.getElementById('candidates').innerHTML = candidates
+      .map((c) => `<option value="${escapeHtml(c)}"></option>`)
+      .join('');
+  }
+
+  document.getElementById('add-button').addEventListener('click', () => {
+    addForm.classList.add('open');
+    addError.textContent = '';
+    loadCandidates();
+    addInput.focus();
+  });
+
+  providerSelect.addEventListener('change', loadCandidates);
+
+  document.getElementById('cancel-add').addEventListener('click', () => {
+    addForm.classList.remove('open');
+    addInput.value = '';
+  });
+
+  addForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    addError.textContent = '';
+    // Passed as a query parameter: WebKit drops request bodies on custom URL schemes.
+    const res = await fetch(
+      `/api/accounts?provider=${providerSelect.value}&configDir=${encodeURIComponent(addInput.value)}`,
+      { method: 'POST' },
+    );
+    const body = await res.json();
+    if (!res.ok) {
+      addError.textContent = body.error;
+      return;
+    }
+    data = body;
+    addInput.value = '';
+    addForm.classList.remove('open');
+    render();
+  });
+
+  accountsEl.addEventListener('click', async (event) => {
+    const button = event.target.closest('.remove');
+    if (!button) return;
+    const { configDir } = button.dataset;
+    if (!confirm(`Stop monitoring ${configDir}?`)) return;
+    const res = await fetch(`/api/accounts?configDir=${encodeURIComponent(configDir)}`, { method: 'DELETE' });
+    if (res.ok) {
+      data = await res.json();
+      render();
+    }
+  });
+
+  document.getElementById('refresh-button').addEventListener('click', async () => {
+    await fetch('/api/refresh', { method: 'POST' });
+    setTimeout(load, 1500);
+  });
+
+  // Inside the menu bar app: report content height so the popover can size itself,
+  // and show the app-only controls.
+  if (embedded) {
+    document.documentElement.classList.add('embedded');
+    const reportHeight = () =>
+      window.webkit.messageHandlers.resize.postMessage(Math.ceil(document.querySelector('main').getBoundingClientRect().height));
+    new ResizeObserver(reportHeight).observe(document.querySelector('main'));
+
+    const launchToggle = document.getElementById('launch-at-login');
+    fetch('/api/app').then((res) => res.json()).then(({ launchAtLogin }) => {
+      launchToggle.checked = launchAtLogin;
+    });
+    launchToggle.addEventListener('change', async () => {
+      const res = await fetch(`/api/launch-at-login?enabled=${launchToggle.checked ? 1 : 0}`, { method: 'POST' });
+      const body = await res.json();
+      if (!res.ok) alert(body.error);
+      launchToggle.checked = Boolean(body.launchAtLogin);
+    });
+    document.getElementById('quit-button').addEventListener('click', () => fetch('/api/quit', { method: 'POST' }));
+  }
+
+  load();
+  setInterval(load, 15 * 1000);
+</script>
+</body>
+</html>
