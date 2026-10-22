@@ -34,7 +34,7 @@ function loadAccounts() {
   // Codex stays in the macOS app. Claude and Grok are polled here.
   const saved = JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf8'))
     .filter((a) => ['claude', 'grok'].includes(a.provider ?? 'claude'))
-    .map((a) => ({ provider: a.provider ?? 'claude', configDir: normalizeDir(a.configDir) }));
+    .map((a) => ({ provider: a.provider ?? 'claude', configDir: normalizeDir(a.configDir), alias: a.alias ?? null }));
   return saved.length > 0 ? saved : fallback;
 }
 
@@ -42,6 +42,7 @@ function saveAccounts() {
   const data = [...state.values()].map((entry) => ({
     provider: entry.provider,
     configDir: collapseHome(entry.configDir),
+    ...(entry.alias ? { alias: entry.alias } : {}),
   }));
   writeFileSync(ACCOUNTS_FILE, `${JSON.stringify(data, null, 2)}\n`);
 }
@@ -114,6 +115,7 @@ function createEntry(provider, dir, cached) {
   return {
     provider,
     configDir: dir,
+    alias: null,
     email: null,
     plan: null,
     limits: cached?.limits ?? null,
@@ -358,6 +360,7 @@ function publicState() {
     accounts: [...state.values()].map((e) => ({
       provider: e.provider,
       configDir: collapseHome(e.configDir),
+      alias: e.alias,
       email: e.email,
       plan: e.plan,
       limits: e.limits,
@@ -426,6 +429,14 @@ const server = createServer(async (req, res) => {
       return send(res, 200, publicState());
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/alias') {
+      const entry = state.get(normalizeDir(url.searchParams.get('configDir') ?? ''));
+      if (!entry) return send(res, 404, { error: 'Unknown account' });
+      entry.alias = (url.searchParams.get('alias') ?? '').trim() || null;
+      saveAccounts();
+      return send(res, 200, publicState());
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/refresh') {
       for (const entry of state.values()) {
         if (!entry.fetchedAt || Date.now() - entry.fetchedAt > MIN_MANUAL_REFRESH_MS) entry.nextFetchAt = 0;
@@ -442,7 +453,9 @@ const server = createServer(async (req, res) => {
 
 const cache = loadCache();
 for (const account of loadAccounts()) {
-  state.set(account.configDir, createEntry(account.provider, account.configDir, cache[account.configDir]));
+  const entry = createEntry(account.provider, account.configDir, cache[account.configDir]);
+  entry.alias = account.alias;
+  state.set(account.configDir, entry);
 }
 
 // Stagger the initial requests so accounts don't all hit the endpoint at once.

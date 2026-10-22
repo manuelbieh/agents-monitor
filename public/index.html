@@ -122,7 +122,27 @@
   }
   .row.blocked .account-name { color: var(--text-muted); }
 
+  /* Sits on the plan line and reads as plain text until hovered or focused. */
+  .alias {
+    flex: 1 1 0;
+    min-width: 120px;
+    margin: -2px 0;
+    padding: 1px 5px;
+    font: inherit;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+  }
+  .alias::placeholder { color: var(--text-dim); }
+  .alias:hover { border-color: var(--divider); }
+  .alias:focus { outline: none; border-color: var(--text-dim); background: #1f1e1c; }
+
   .account-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 2px;
     margin-top: 8px;
     font-size: 17px;
     color: var(--text-muted);
@@ -233,6 +253,8 @@
 
   const embedded = new URLSearchParams(location.search).has('embedded') && Boolean(window.webkit?.messageHandlers?.resize);
   let data = { accounts: [] };
+  // Chromium fires focusout on a focused field that a re-render removes.
+  let rendering = false;
 
   const escapeHtml = (s) =>
     String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -335,7 +357,12 @@
       <div class="row${blocked ? ' blocked' : ''}">
         <div>
           <div class="account-name" title="${escapeHtml(account.configDir)}">${escapeHtml(name)}</div>
-          <div class="account-meta">${meta.join(' · ')}</div>
+          <div class="account-meta">
+            <span>${meta.join(' · ')} ·</span>
+            <input class="alias" type="text" value="${escapeHtml(account.alias ?? '')}" placeholder="Add alias"
+              maxlength="80" autocomplete="off" spellcheck="false" aria-label="Alias for ${escapeHtml(name)}"
+              data-config-dir="${escapeHtml(account.configDir)}">
+          </div>
         </div>
         ${columns}
         <button class="remove" type="button" title="Remove account" data-config-dir="${escapeHtml(account.configDir)}">×</button>
@@ -361,10 +388,24 @@
       return;
     }
 
+    // The periodic refresh re-renders everything; keep an alias that is being typed.
+    const editing = document.activeElement?.classList.contains('alias') ? document.activeElement : null;
+
+    rendering = true;
     accountsEl.innerHTML = PROVIDERS.map((provider) => {
       const members = accounts.filter((a) => (a.provider ?? 'claude') === provider.id);
       return members.length > 0 ? renderSection(provider, members, now) : '';
     }).join('');
+    rendering = false;
+
+    if (editing) {
+      const input = [...accountsEl.querySelectorAll('.alias')].find((el) => el.dataset.configDir === editing.dataset.configDir);
+      if (input) {
+        input.value = editing.value;
+        input.focus();
+        input.setSelectionRange(editing.selectionStart, editing.selectionEnd);
+      }
+    }
 
     const fetched = accounts.map((a) => a.fetchedAt).filter(Boolean);
     footerEl.textContent = fetched.length
@@ -433,6 +474,37 @@
     if (res.ok) {
       data = await res.json();
       render();
+    }
+  });
+
+  // Saves when the field loses focus, which includes the popover closing.
+  accountsEl.addEventListener('focusout', async (event) => {
+    const input = event.target.closest('.alias');
+    if (!input || rendering) return;
+    const { configDir } = input.dataset;
+    const alias = input.value.trim();
+    const account = data.accounts.find((a) => a.configDir === configDir);
+    if (!account || (account.alias ?? '') === alias) return;
+    account.alias = alias;
+    const res = await fetch(
+      `/api/alias?configDir=${encodeURIComponent(configDir)}&alias=${encodeURIComponent(alias)}`,
+      { method: 'POST' },
+    );
+    if (res.ok) {
+      data = await res.json();
+      render();
+    }
+  });
+
+  accountsEl.addEventListener('keydown', (event) => {
+    const input = event.target.closest('.alias');
+    if (!input) return;
+    if (event.key === 'Enter') input.blur();
+    if (event.key === 'Escape') {
+      // Cancel the edit without also closing the popover.
+      event.preventDefault();
+      input.value = data.accounts.find((a) => a.configDir === input.dataset.configDir)?.alias ?? '';
+      input.blur();
     }
   });
 

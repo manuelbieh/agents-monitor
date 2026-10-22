@@ -10,6 +10,8 @@ and exactly when each one resets.
   orange down to 25%, red below that; a solid red bar means the account is currently blocked.
 - **Popover:** every account with each limit's remaining percentage, the exact time until reset
   (`in 2d 22h · Sun 04.10. 03:00`) and, for blocked accounts, when you're back.
+- **Aliases:** click **Add alias** next to an account's plan to name it, so accounts with similar
+  logins are easy to tell apart. Return or closing the popover saves it, Escape cancels.
 - **Multiple accounts:** add as many Claude Code config directories (`CLAUDE_CONFIG_DIR`), Codex
   homes (`CODEX_HOME`), and Grok config directories as you like from the popover. The default
   `~/.grok` login is added once, the first time it exists.

@@ -59,6 +59,13 @@ final class SchemeHandler: NSObject, WKURLSchemeHandler {
                 respondJSON(task, ["error": "Unknown account"], status: 404)
             }
 
+        case ("POST", "/api/alias"):
+            if monitor.setAlias(param("alias") ?? "", for: param("configDir") ?? "") {
+                respondJSON(task, monitor.publicState())
+            } else {
+                respondJSON(task, ["error": "Unknown account"], status: 404)
+            }
+
         case ("POST", "/api/refresh"):
             monitor.refreshAll()
             respondJSON(task, ["ok": true], status: 202)
@@ -111,7 +118,7 @@ final class SchemeHandler: NSObject, WKURLSchemeHandler {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKScriptMessageHandler, WKUIDelegate {
     private let monitor = Monitor()
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
@@ -134,6 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         setUpWebView()
 
         popover.behavior = .transient
+        popover.delegate = self
         popover.appearance = NSAppearance(named: .darkAqua)
         popover.contentSize = NSSize(width: popoverWidth, height: 300)
         let controller = NSViewController()
@@ -149,6 +157,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.autosaveName = statusItemName
+        // On macOS 27, clicks open and close the popover through an expanded interface
+        // session, which lets the item take part in menu bar keyboard navigation and
+        // tracking. Clicks then skip the action, but Accessibility presses (VoiceOver,
+        // menu bar managers) still arrive there, so it stays set.
+        if #available(macOS 27, *) {
+            statusItem.expandedInterfaceDelegate = self
+        }
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePopover)
         updateStatusItem()
@@ -193,15 +208,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
 
     @objc private func togglePopover() {
-        guard let button = statusItem.button else { return }
         if popover.isShown {
             popover.performClose(nil)
-            return
+        } else {
+            showPopover()
         }
+    }
+
+    private func showPopover() {
+        // An Accessibility press opens the popover, then macOS begins a session for it.
+        guard !popover.isShown, let button = statusItem.button else { return }
         webView.evaluateJavaScript("load()")
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
         popover.contentViewController?.view.window?.makeKey()
+        // Becoming key focuses the first text field in the page, which would put the
+        // caret in an alias field and swallow Escape. Start with nothing focused.
+        webView.evaluateJavaScript("document.activeElement?.blur()")
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        // WebKit doesn't blur the focused field when the popover closes. Blurring it
+        // here saves an alias that was typed without pressing Return.
+        webView.evaluateJavaScript("document.activeElement?.blur()")
+        // The transient popover closes itself on outside clicks and Escape. End the
+        // session too, or macOS keeps treating the item as open.
+        if #available(macOS 27, *) {
+            statusItem.expandedInterfaceSession?.cancel()
+        }
     }
 
     // MARK: Status item
@@ -296,6 +330,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         completionHandler(alert.runModal() == .alertFirstButtonReturn)
+    }
+}
+
+@available(macOS 27, *)
+extension AppDelegate: NSStatusItemExpandedInterfaceDelegate {
+    func statusItem(_ statusItem: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {
+        showPopover()
+    }
+
+    func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
+        guard popover.isShown else { return }
+        popover.animates = animated
+        popover.performClose(nil)
+        popover.animates = true
     }
 }
 

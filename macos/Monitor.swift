@@ -122,6 +122,8 @@ struct Limit {
 final class Account {
     let provider: Provider
     let configDir: String
+    /// A user-chosen note that tells similar-looking accounts apart.
+    var alias: String?
     var email: String?
     var plan: String?
     var limits: [Limit]?
@@ -424,13 +426,13 @@ final class Monitor {
     // MARK: Persistence
 
     private func load() {
-        var entries: [(Provider, String)] = [(.claude, Provider.claude.defaultConfigDir)]
+        var entries: [(Provider, String, String?)] = [(.claude, Provider.claude.defaultConfigDir, nil)]
         if let data = try? Data(contentsOf: accountsFile),
            let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             entries = list.compactMap { item in
                 guard let dir = item["configDir"] as? String else { return nil }
                 let provider = (item["provider"] as? String).flatMap(Provider.init(rawValue:)) ?? .claude
-                return (provider, normalizeDir(dir))
+                return (provider, normalizeDir(dir), item["alias"] as? String)
             }
         }
 
@@ -438,8 +440,9 @@ final class Monitor {
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
 
         let now = Date()
-        for (index, (provider, dir)) in entries.enumerated() {
+        for (index, (provider, dir, alias)) in entries.enumerated() {
             let account = Account(provider: provider, configDir: dir)
+            account.alias = alias
             if let cached = cache[dir] as? [String: Any] {
                 account.limits = (cached["limits"] as? [[String: Any]])?.compactMap(Limit.init(dictionary:))
                 account.fetchedAt = (cached["fetchedAt"] as? NSNumber)?.doubleValue
@@ -469,7 +472,11 @@ final class Monitor {
     }
 
     private func saveAccounts() {
-        let list = accounts.map { ["provider": $0.provider.rawValue, "configDir": collapseHome($0.configDir)] }
+        let list = accounts.map { account -> [String: String] in
+            var item = ["provider": account.provider.rawValue, "configDir": collapseHome(account.configDir)]
+            item["alias"] = account.alias
+            return item
+        }
         if let data = try? JSONSerialization.data(withJSONObject: list, options: [.prettyPrinted, .withoutEscapingSlashes]) {
             try? data.write(to: accountsFile)
         }
@@ -526,6 +533,15 @@ final class Monitor {
         saveAccounts()
         saveCache()
         onChange?()
+        return true
+    }
+
+    /// An empty alias removes it.
+    func setAlias(_ alias: String, for rawDir: String) -> Bool {
+        guard let account = account(for: normalizeDir(rawDir)) else { return false }
+        let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        account.alias = trimmed.isEmpty ? nil : trimmed
+        saveAccounts()
         return true
     }
 
@@ -699,6 +715,7 @@ final class Monitor {
                     "configDir": collapseHome(account.configDir),
                     "loading": account.inFlight && account.limits == nil,
                 ]
+                dict["alias"] = account.alias
                 dict["email"] = account.email
                 dict["plan"] = account.plan
                 dict["limits"] = account.limits?.map(\.dictionary)
