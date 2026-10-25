@@ -29,11 +29,15 @@ Requires macOS 14+ and Xcode's command line tools.
 ./build.sh --install
 ```
 
-This builds a universal `Agents Monitor.app`, copies it to `~/Applications` and starts it. Tick
-**Launch at login** in the popover to keep it running.
+This builds a universal `Agents Monitor.app`, copies it to `/Applications` and starts it. Tick
+**Launch at login** in the popover to keep it running. The app is signed with the first
+"Developer ID Application" identity in your keychain, or the one in `CODESIGN_IDENTITY`, and ad-hoc
+when there is none.
 
 If you use a menu bar manager such as Ice, Bartender or Thaw, it may put the new item in its hidden
-section. ⌘-drag it to the visible area once.
+section. ⌘-drag it to the visible area once. On macOS 27, Bartender can't show or move the item of
+an app outside `/Applications`, because macOS identifies it by its binary path instead of its bundle
+ID. `build.sh` only falls back to `~/Applications` when `/Applications` isn't writable.
 
 ## How it works
 
