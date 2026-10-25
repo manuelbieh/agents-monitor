@@ -66,6 +66,22 @@ final class SchemeHandler: NSObject, WKURLSchemeHandler {
                 respondJSON(task, ["error": "Unknown account"], status: 404)
             }
 
+        case ("POST", "/api/color"):
+            let color = param("color") ?? "default"
+            guard color == "default" || accountColors.contains(color) else {
+                return respondJSON(task, ["error": "Unknown color"], status: 400)
+            }
+            if monitor.setColor(color, for: param("configDir") ?? "") {
+                respondJSON(task, monitor.publicState())
+            } else {
+                respondJSON(task, ["error": "Unknown account"], status: 404)
+            }
+
+        case ("POST", "/api/order"):
+            // One configDir parameter per account, in the new order.
+            monitor.reorder(query.filter { $0.name == "configDir" }.compactMap(\.value))
+            respondJSON(task, monitor.publicState())
+
         case ("POST", "/api/refresh"):
             monitor.refreshAll()
             respondJSON(task, ["ok": true], status: 202)

@@ -17,6 +17,7 @@
     --amber: #d9a13b;
     --red: #e0533f;
     --salmon: #f09a82;
+    --raised: #23221f;
     --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
   }
@@ -35,7 +36,8 @@
 
   .app-only { display: none; }
   .embedded .app-only { display: inline-flex; }
-  .embedded body { overflow: hidden; }
+  /* The popover stops growing at its maximum height; the rest scrolls, without rubber-banding. */
+  .embedded { overscroll-behavior: none; }
   .embedded main { padding: 26px 26px 18px; }
   .embedded .account-name { font-size: 19px; }
   .embedded .reset { font-size: 16px; }
@@ -50,17 +52,21 @@
   }
   .toggle input { accent-color: var(--green); margin: 0; }
 
-  /* Sits on the same line as the first section title. */
+  /* Sits on the same line as the first section title, and above it: sections are positioned too. */
   header {
     position: absolute;
+    z-index: 1;
     top: 36px;
     right: 30px;
     display: flex;
     gap: 8px;
   }
 
+  /* Positioned so rows measure their offsets against their own section while dragging. */
+  .provider { position: relative; }
   .provider + .provider { margin-top: 38px; }
   .section-title {
+    position: relative;
     display: flex;
     align-items: baseline;
     gap: 10px;
@@ -112,6 +118,90 @@
   }
   .row:last-child { border-bottom: none; }
 
+  /* Sits in the left margin and reaches the content edge, so hovering across to it keeps it shown. */
+  .handle {
+    position: absolute;
+    top: 50%;
+    left: -22px;
+    display: flex;
+    align-items: center;
+    width: 22px;
+    height: 28px;
+    padding-left: 4px;
+    color: var(--text-muted);
+    cursor: grab;
+    opacity: 0;
+    transform: translateY(-50%);
+    transition: opacity 0.12s ease;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .handle svg { fill: currentColor; }
+  .handle:hover { color: var(--text); }
+  .row:hover .handle, .section-title:hover .handle, .dragging .handle { opacity: 1; }
+
+  .reordering, .reordering * {
+    cursor: grabbing !important;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  /* The spread shadows pad the lifted item, reaching further left to take in the handle,
+     without changing its layout. */
+  .dragging {
+    z-index: 5;
+    background: var(--raised);
+    border-radius: 4px;
+    box-shadow: -6px 0 0 14px var(--raised), 0 0 0 14px var(--raised), 0 16px 36px 14px rgba(0, 0, 0, 0.5);
+  }
+  .row.dragging { border-bottom-color: transparent; }
+
+  .account-head {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .dot {
+    position: relative;
+    flex: none;
+    width: 12px;
+    height: 12px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--dot);
+  }
+  /* A larger hit area than the dot itself. */
+  .dot::before { content: ''; position: absolute; inset: -7px; border-radius: 50%; }
+  .dot:hover, .dot[aria-expanded="true"] { box-shadow: 0 0 0 3px var(--bg), 0 0 0 4px var(--text-dim); }
+  .dot:focus-visible, .swatch:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+
+  .color-menu {
+    position: absolute;
+    z-index: 10;
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    background: var(--raised);
+    border: 1px solid var(--divider);
+    border-radius: 14px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  }
+  .color-menu[hidden] { display: none; }
+  .swatch {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--dot);
+    transition: transform 0.12s ease;
+  }
+  .swatch:hover { transform: scale(1.15); }
+  .swatch[aria-checked="true"] { box-shadow: 0 0 0 2px var(--raised), 0 0 0 4px var(--text); }
+
   .account-name {
     font: 700 21px/1.35 var(--mono);
     letter-spacing: 0.01em;
@@ -138,12 +228,14 @@
   .alias:hover { border-color: var(--divider); }
   .alias:focus { outline: none; border-color: var(--text-dim); background: #1f1e1c; }
 
+  /* Indented by the dot and its gap, so the plan line starts under the name. */
   .account-meta {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
     column-gap: 2px;
     margin-top: 8px;
+    padding-left: 22px;
     font-size: 17px;
     color: var(--text-muted);
   }
@@ -231,11 +323,14 @@
 
   <div id="accounts"></div>
   <footer id="footer"></footer>
+  <div class="color-menu" id="color-menu" role="menu" aria-label="Account color" hidden></div>
 </main>
 
 <script>
+  const mainEl = document.querySelector('main');
   const accountsEl = document.getElementById('accounts');
   const footerEl = document.getElementById('footer');
+  const colorMenu = document.getElementById('color-menu');
   const addForm = document.getElementById('add-form');
   const addInput = document.getElementById('config-dir');
   const providerSelect = document.getElementById('provider');
@@ -250,11 +345,35 @@
     { id: 'codex', name: 'Codex' },
     { id: 'grok', name: 'Grok' },
   ];
+  // Claude Code's /color palette (default theme). Accounts without a color get the grey dot.
+  const COLORS = {
+    red: 'rgb(220, 38, 38)',
+    blue: 'rgb(106, 155, 204)',
+    green: 'rgb(22, 163, 74)',
+    yellow: 'rgb(202, 138, 4)',
+    purple: 'rgb(130, 125, 189)',
+    orange: 'rgb(217, 119, 87)',
+    pink: 'rgb(196, 102, 134)',
+    cyan: 'rgb(8, 145, 178)',
+    default: '#77746f',
+  };
+  const HANDLE = `
+    <span class="handle" title="Drag to reorder">
+      <svg width="8" height="14" viewBox="0 0 8 14" aria-hidden="true">
+        <circle cx="2" cy="2" r="1.4"/><circle cx="6" cy="2" r="1.4"/>
+        <circle cx="2" cy="7" r="1.4"/><circle cx="6" cy="7" r="1.4"/>
+        <circle cx="2" cy="12" r="1.4"/><circle cx="6" cy="12" r="1.4"/>
+      </svg>
+    </span>`;
 
   const embedded = new URLSearchParams(location.search).has('embedded') && Boolean(window.webkit?.messageHandlers?.resize);
   let data = { accounts: [] };
   // Chromium fires focusout on a focused field that a re-render removes.
   let rendering = false;
+  // The account whose dot opened the color menu.
+  let colorTarget = null;
+  // The row or section being dragged, from pointerdown until it has settled after the drop.
+  let drag = null;
 
   const escapeHtml = (s) =>
     String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -353,10 +472,17 @@
     }
 
     const name = account.email ?? account.configDir;
+    const color = Object.hasOwn(COLORS, account.color ?? '') ? account.color : 'default';
     return `
-      <div class="row${blocked ? ' blocked' : ''}">
+      <div class="row${blocked ? ' blocked' : ''}" data-config-dir="${escapeHtml(account.configDir)}">
         <div>
-          <div class="account-name" title="${escapeHtml(account.configDir)}">${escapeHtml(name)}</div>
+          <div class="account-head">
+            ${HANDLE}
+            <button class="dot" type="button" style="--dot:${COLORS[color]}" data-config-dir="${escapeHtml(account.configDir)}"
+              aria-haspopup="menu" aria-expanded="${colorTarget === account.configDir}"
+              aria-label="Color for ${escapeHtml(name)}: ${color}" title="Change color"></button>
+            <div class="account-name" title="${escapeHtml(account.configDir)}">${escapeHtml(name)}</div>
+          </div>
           <div class="account-meta">
             <span>${meta.join(' · ')} ·</span>
             <input class="alias" type="text" value="${escapeHtml(account.alias ?? '')}" placeholder="Add alias"
@@ -373,12 +499,14 @@
     const columnCount = Math.max(3, ...accounts.map((a) => a.limits?.length ?? 0));
     return `
       <section class="provider" style="--cols:${columnCount}">
-        <h2 class="section-title">${escapeHtml(provider.name)} <span class="count">${accounts.length}</span></h2>
+        <h2 class="section-title">${HANDLE}${escapeHtml(provider.name)} <span class="count">${accounts.length}</span></h2>
         ${accounts.map((a) => renderAccount(a, now, columnCount)).join('')}
       </section>`;
   }
 
   function render() {
+    // A re-render would drop the item being dragged. The drop renders afterwards.
+    if (drag?.active) return;
     const now = Date.now();
     const { accounts } = data;
 
@@ -388,22 +516,29 @@
       return;
     }
 
-    // The periodic refresh re-renders everything; keep an alias that is being typed.
-    const editing = document.activeElement?.classList.contains('alias') ? document.activeElement : null;
+    // The periodic refresh re-renders everything; keep an alias that is being typed, or a focused dot.
+    const focused = accountsEl.contains(document.activeElement) && document.activeElement.matches('.alias, .dot')
+      ? document.activeElement
+      : null;
 
+    // Sections follow the order of their first account, so one saved list orders both.
+    const providerIds = [...new Set(accounts.map((a) => a.provider ?? 'claude'))];
     rendering = true;
-    accountsEl.innerHTML = PROVIDERS.map((provider) => {
-      const members = accounts.filter((a) => (a.provider ?? 'claude') === provider.id);
-      return members.length > 0 ? renderSection(provider, members, now) : '';
+    accountsEl.innerHTML = providerIds.map((id) => {
+      const provider = PROVIDERS.find((p) => p.id === id) ?? { id, name: id };
+      return renderSection(provider, accounts.filter((a) => (a.provider ?? 'claude') === id), now);
     }).join('');
     rendering = false;
 
-    if (editing) {
-      const input = [...accountsEl.querySelectorAll('.alias')].find((el) => el.dataset.configDir === editing.dataset.configDir);
-      if (input) {
-        input.value = editing.value;
-        input.focus();
-        input.setSelectionRange(editing.selectionStart, editing.selectionEnd);
+    if (focused) {
+      const selector = focused.classList.contains('alias') ? '.alias' : '.dot';
+      const match = [...accountsEl.querySelectorAll(selector)].find((el) => el.dataset.configDir === focused.dataset.configDir);
+      if (match && selector === '.alias') {
+        match.value = focused.value;
+        match.focus();
+        match.setSelectionRange(focused.selectionStart, focused.selectionEnd);
+      } else {
+        match?.focus();
       }
     }
 
@@ -507,6 +642,226 @@
       input.blur();
     }
   });
+
+  // ---------- colors ----------
+
+  colorMenu.innerHTML = Object.entries(COLORS)
+    .map(([name, value]) =>
+      `<button class="swatch" type="button" role="menuitemradio" data-color="${name}" style="--dot:${value}"
+        title="${name}" aria-label="${name}"></button>`)
+    .join('');
+
+  const dotFor = (configDir) => [...accountsEl.querySelectorAll('.dot')].find((el) => el.dataset.configDir === configDir);
+
+  function openColorMenu(dot) {
+    closeColorMenu();
+    colorTarget = dot.dataset.configDir;
+    dot.setAttribute('aria-expanded', 'true');
+    const current = data.accounts.find((a) => a.configDir === colorTarget)?.color ?? 'default';
+    for (const swatch of colorMenu.children) swatch.setAttribute('aria-checked', String(swatch.dataset.color === current));
+    colorMenu.hidden = false;
+
+    // Below the dot, or above it when the popover has no room left underneath.
+    const origin = mainEl.getBoundingClientRect();
+    const anchor = dot.getBoundingClientRect();
+    const fitsBelow = anchor.bottom + 12 + colorMenu.offsetHeight <= innerHeight;
+    colorMenu.style.left = `${anchor.left - origin.left - 12}px`;
+    colorMenu.style.top = fitsBelow
+      ? `${anchor.bottom - origin.top + 12}px`
+      : `${anchor.top - origin.top - 12 - colorMenu.offsetHeight}px`;
+    colorMenu.querySelector('[aria-checked="true"]').focus();
+  }
+
+  function closeColorMenu({ focusDot = false } = {}) {
+    if (colorMenu.hidden) return;
+    colorMenu.hidden = true;
+    const dot = dotFor(colorTarget);
+    colorTarget = null;
+    dot?.setAttribute('aria-expanded', 'false');
+    if (focusDot) dot?.focus();
+  }
+
+  async function setColor(configDir, color) {
+    const account = data.accounts.find((a) => a.configDir === configDir);
+    if (!account) return;
+    account.color = color === 'default' ? null : color;
+    render();
+    const res = await fetch(`/api/color?configDir=${encodeURIComponent(configDir)}&color=${color}`, { method: 'POST' });
+    if (res.ok) {
+      data = await res.json();
+      render();
+    }
+  }
+
+  accountsEl.addEventListener('click', (event) => {
+    const dot = event.target.closest('.dot');
+    if (!dot) return;
+    if (colorTarget === dot.dataset.configDir) closeColorMenu();
+    else openColorMenu(dot);
+  });
+
+  colorMenu.addEventListener('click', (event) => {
+    const swatch = event.target.closest('.swatch');
+    if (!swatch) return;
+    const configDir = colorTarget;
+    closeColorMenu({ focusDot: true });
+    setColor(configDir, swatch.dataset.color);
+  });
+
+  colorMenu.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      // Close the menu without also closing the popover.
+      event.preventDefault();
+      closeColorMenu({ focusDot: true });
+      return;
+    }
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+    if (!step) return;
+    event.preventDefault();
+    const swatches = [...colorMenu.children];
+    const index = swatches.indexOf(document.activeElement);
+    swatches[(index + step + swatches.length) % swatches.length].focus();
+  });
+
+  document.addEventListener('pointerdown', (event) => {
+    if (!event.target.closest('.color-menu, .dot')) closeColorMenu();
+  });
+  window.addEventListener('blur', () => closeColorMenu());
+
+  // ---------- reordering ----------
+
+  // A row's handle moves it within its own section, a section title's handle moves the whole section.
+  accountsEl.addEventListener('pointerdown', (event) => {
+    const handle = event.target.closest('.handle');
+    if (event.button !== 0 || drag || !handle) return;
+    const item = handle.closest('.row') ?? handle.closest('.provider');
+    drag = { item, startY: event.clientY, clientY: event.clientY, active: false };
+  });
+
+  window.addEventListener('pointermove', (event) => {
+    if (!drag || drag.dropping) return;
+    drag.clientY = event.clientY;
+    if (!drag.active) {
+      // Short movements stay clicks.
+      if (Math.abs(drag.clientY - drag.startY) < 4) return;
+      startDrag();
+    }
+    followPointer();
+  });
+
+  window.addEventListener('pointerup', () => {
+    if (drag?.active && !drag.dropping) drop();
+    else if (!drag?.dropping) drag = null;
+  });
+
+  window.addEventListener('pointercancel', () => {
+    if (drag?.active && !drag.dropping) cancelDrag();
+    else if (!drag?.dropping) drag = null;
+  });
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !drag?.active || drag.dropping) return;
+    // Cancel the drag without also closing the popover.
+    event.preventDefault();
+    cancelDrag();
+  });
+
+  // Wheel scrolling and edge scrolling move the content under a pointer that stays put.
+  window.addEventListener('scroll', () => {
+    if (drag?.active && !drag.dropping) followPointer();
+  });
+
+  function startDrag() {
+    drag.active = true;
+    drag.grab = drag.startY - drag.item.getBoundingClientRect().top;
+    closeColorMenu();
+    document.activeElement?.blur();
+    getSelection().removeAllRanges();
+    document.documentElement.classList.add('reordering');
+    drag.item.classList.add('dragging');
+    requestAnimationFrame(scrollAtEdges);
+  }
+
+  const kindOf = (item) => (item.classList.contains('row') ? '.row' : '.provider');
+
+  function followPointer() {
+    const { item } = drag;
+    const kind = kindOf(item);
+    // Offsets are layout positions, so sibling animations don't disturb the hit testing.
+    const y = drag.clientY - item.offsetParent.getBoundingClientRect().top;
+    const siblings = [...item.parentElement.children].filter((el) => el !== item && el.matches(kind));
+    if (siblings.length === 0) return;
+
+    const next = siblings.find((el) => y < el.offsetTop + el.offsetHeight / 2);
+    const target = next ? siblings.indexOf(next) : siblings.length;
+    const current = [...item.parentElement.children].filter((el) => el.matches(kind)).indexOf(item);
+    if (target !== current) {
+      const before = siblings.map((el) => el.offsetTop);
+      if (next) next.before(item);
+      else siblings.at(-1).after(item);
+      siblings.forEach((el, i) => {
+        const shift = before[i] - el.offsetTop;
+        if (shift) el.animate([{ transform: `translateY(${shift}px)` }, { transform: 'none' }], { duration: 160, easing: 'ease-out' });
+      });
+    }
+
+    // Follow the pointer, but stay within the group.
+    const group = [...item.parentElement.children].filter((el) => el.matches(kind));
+    const last = group.at(-1);
+    const top = Math.max(group[0].offsetTop, Math.min(last.offsetTop + last.offsetHeight - item.offsetHeight, y - drag.grab));
+    item.style.transform = `translateY(${top - item.offsetTop}px)`;
+  }
+
+  function scrollAtEdges() {
+    if (!drag?.active || drag.dropping) return;
+    const edge = 60;
+    const { clientY } = drag;
+    const distance = clientY < edge ? clientY - edge : clientY > innerHeight - edge ? clientY - (innerHeight - edge) : 0;
+    if (distance) scrollBy(0, distance / 4);
+    requestAnimationFrame(scrollAtEdges);
+  }
+
+  function endDrag() {
+    document.documentElement.classList.remove('reordering');
+    drag.item.classList.remove('dragging');
+    drag.item.style.transform = '';
+    drag = null;
+  }
+
+  function cancelDrag() {
+    endDrag();
+    // The data still holds the old order.
+    render();
+  }
+
+  async function drop() {
+    drag.dropping = true;
+    const { item } = drag;
+    const offset = item.style.transform;
+    item.style.transform = '';
+    const settled = item.animate([{ transform: offset }, { transform: 'none' }], { duration: 150, easing: 'ease-out' })
+      .finished.catch(() => {});
+
+    const order = [...accountsEl.querySelectorAll('.row')].map((row) => row.dataset.configDir);
+    const unchanged = order.join('\n') === data.accounts.map((a) => a.configDir).join('\n');
+    if (!unchanged) {
+      const byDir = new Map(data.accounts.map((a) => [a.configDir, a]));
+      data.accounts = [
+        ...order.map((dir) => byDir.get(dir)).filter(Boolean),
+        ...data.accounts.filter((a) => !order.includes(a.configDir)),
+      ];
+    }
+    const saved = unchanged
+      ? null
+      : fetch(`/api/order?${order.map((dir) => `configDir=${encodeURIComponent(dir)}`).join('&')}`, { method: 'POST' })
+        .catch(() => null);
+
+    await settled;
+    endDrag();
+    const res = await saved;
+    if (res?.ok) data = await res.json();
+    render();
+  }
 
   document.getElementById('refresh-button').addEventListener('click', async () => {
     await fetch('/api/refresh', { method: 'POST' });

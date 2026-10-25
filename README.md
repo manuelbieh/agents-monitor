@@ -12,6 +12,11 @@ and exactly when each one resets.
   (`in 2d 22h · Sun 04.10. 03:00`) and, for blocked accounts, when you're back.
 - **Aliases:** click **Add alias** next to an account's plan to name it, so accounts with similar
   logins are easy to tell apart. Return or closing the popover saves it, Escape cancels.
+- **Colors:** click the grey dot in front of an account to give it one of Claude Code's `/color`
+  colors (red, blue, green, yellow, purple, orange, pink, cyan) or set it back to the default.
+- **Order:** hover an account or a section title and drag the grip that appears to its left. An
+  account moves within its section, a section title moves the whole section. The menu bar bars
+  follow the same order. Escape cancels a drag.
 - **Multiple accounts:** add as many Claude Code config directories (`CLAUDE_CONFIG_DIR`), Codex
   homes (`CODEX_HOME`), and Grok config directories as you like from the popover. The default
   `~/.grok` login is added once, the first time it exists.

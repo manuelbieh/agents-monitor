@@ -22,6 +22,9 @@ const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 const MIN_MANUAL_REFRESH_MS = 60 * 1000;
 
+// Claude Code's /color names. An account without one shows the default grey dot.
+const ACCOUNT_COLORS = ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan'];
+
 const expandHome = (p) => (p.startsWith('~') ? path.join(HOME, p.slice(1)) : p);
 const collapseHome = (p) => (p.startsWith(HOME) ? `~${p.slice(HOME.length)}` : p);
 const normalizeDir = (p) => path.resolve(expandHome(p.trim())).replace(/\/+$/, '');
@@ -34,7 +37,12 @@ function loadAccounts() {
   // Codex stays in the macOS app. Claude and Grok are polled here.
   const saved = JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf8'))
     .filter((a) => ['claude', 'grok'].includes(a.provider ?? 'claude'))
-    .map((a) => ({ provider: a.provider ?? 'claude', configDir: normalizeDir(a.configDir), alias: a.alias ?? null }));
+    .map((a) => ({
+      provider: a.provider ?? 'claude',
+      configDir: normalizeDir(a.configDir),
+      alias: a.alias ?? null,
+      color: ACCOUNT_COLORS.includes(a.color) ? a.color : null,
+    }));
   return saved.length > 0 ? saved : fallback;
 }
 
@@ -43,6 +51,7 @@ function saveAccounts() {
     provider: entry.provider,
     configDir: collapseHome(entry.configDir),
     ...(entry.alias ? { alias: entry.alias } : {}),
+    ...(entry.color ? { color: entry.color } : {}),
   }));
   writeFileSync(ACCOUNTS_FILE, `${JSON.stringify(data, null, 2)}\n`);
 }
@@ -116,6 +125,7 @@ function createEntry(provider, dir, cached) {
     provider,
     configDir: dir,
     alias: null,
+    color: null,
     email: null,
     plan: null,
     limits: cached?.limits ?? null,
@@ -361,6 +371,7 @@ function publicState() {
       provider: e.provider,
       configDir: collapseHome(e.configDir),
       alias: e.alias,
+      color: e.color,
       email: e.email,
       plan: e.plan,
       limits: e.limits,
@@ -437,6 +448,27 @@ const server = createServer(async (req, res) => {
       return send(res, 200, publicState());
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/color') {
+      const color = url.searchParams.get('color') ?? 'default';
+      if (color !== 'default' && !ACCOUNT_COLORS.includes(color)) return send(res, 400, { error: 'Unknown color' });
+      const entry = state.get(normalizeDir(url.searchParams.get('configDir') ?? ''));
+      if (!entry) return send(res, 404, { error: 'Unknown account' });
+      entry.color = color === 'default' ? null : color;
+      saveAccounts();
+      return send(res, 200, publicState());
+    }
+
+    // One configDir parameter per account, in the new order. Accounts missing from the
+    // list keep their relative order at the end.
+    if (req.method === 'POST' && url.pathname === '/api/order') {
+      const listed = url.searchParams.getAll('configDir').map(normalizeDir).filter((dir) => state.has(dir));
+      const ordered = new Map([...listed.map((dir) => [dir, state.get(dir)]), ...state]);
+      state.clear();
+      for (const [dir, entry] of ordered) state.set(dir, entry);
+      saveAccounts();
+      return send(res, 200, publicState());
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/refresh') {
       for (const entry of state.values()) {
         if (!entry.fetchedAt || Date.now() - entry.fetchedAt > MIN_MANUAL_REFRESH_MS) entry.nextFetchAt = 0;
@@ -455,6 +487,7 @@ const cache = loadCache();
 for (const account of loadAccounts()) {
   const entry = createEntry(account.provider, account.configDir, cache[account.configDir]);
   entry.alias = account.alias;
+  entry.color = account.color;
   state.set(account.configDir, entry);
 }
 

@@ -7,6 +7,9 @@ let pollInterval: TimeInterval = 5 * 60
 let maxBackoff: TimeInterval = 30 * 60
 let minManualRefresh: TimeInterval = 60
 
+/// Claude Code's /color names. An account without one shows the default grey dot.
+let accountColors = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"]
+
 enum Provider: String, CaseIterable {
     case claude
     case codex
@@ -124,6 +127,8 @@ final class Account {
     let configDir: String
     /// A user-chosen note that tells similar-looking accounts apart.
     var alias: String?
+    /// One of `accountColors`, for the dot next to the account.
+    var color: String?
     var email: String?
     var plan: String?
     var limits: [Limit]?
@@ -426,13 +431,14 @@ final class Monitor {
     // MARK: Persistence
 
     private func load() {
-        var entries: [(Provider, String, String?)] = [(.claude, Provider.claude.defaultConfigDir, nil)]
+        var entries: [(Provider, String, String?, String?)] = [(.claude, Provider.claude.defaultConfigDir, nil, nil)]
         if let data = try? Data(contentsOf: accountsFile),
            let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             entries = list.compactMap { item in
                 guard let dir = item["configDir"] as? String else { return nil }
                 let provider = (item["provider"] as? String).flatMap(Provider.init(rawValue:)) ?? .claude
-                return (provider, normalizeDir(dir), item["alias"] as? String)
+                let color = (item["color"] as? String).flatMap { accountColors.contains($0) ? $0 : nil }
+                return (provider, normalizeDir(dir), item["alias"] as? String, color)
             }
         }
 
@@ -440,9 +446,10 @@ final class Monitor {
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
 
         let now = Date()
-        for (index, (provider, dir, alias)) in entries.enumerated() {
+        for (index, (provider, dir, alias, color)) in entries.enumerated() {
             let account = Account(provider: provider, configDir: dir)
             account.alias = alias
+            account.color = color
             if let cached = cache[dir] as? [String: Any] {
                 account.limits = (cached["limits"] as? [[String: Any]])?.compactMap(Limit.init(dictionary:))
                 account.fetchedAt = (cached["fetchedAt"] as? NSNumber)?.doubleValue
@@ -475,6 +482,7 @@ final class Monitor {
         let list = accounts.map { account -> [String: String] in
             var item = ["provider": account.provider.rawValue, "configDir": collapseHome(account.configDir)]
             item["alias"] = account.alias
+            item["color"] = account.color
             return item
         }
         if let data = try? JSONSerialization.data(withJSONObject: list, options: [.prettyPrinted, .withoutEscapingSlashes]) {
@@ -543,6 +551,25 @@ final class Monitor {
         account.alias = trimmed.isEmpty ? nil : trimmed
         saveAccounts()
         return true
+    }
+
+    /// Any name outside `accountColors` ("default") removes the color.
+    func setColor(_ color: String, for rawDir: String) -> Bool {
+        guard let account = account(for: normalizeDir(rawDir)) else { return false }
+        account.color = accountColors.contains(color) ? color : nil
+        saveAccounts()
+        return true
+    }
+
+    /// Puts the accounts in the given order. Accounts missing from the list keep their
+    /// relative order at the end. The dashboard groups by provider in this order too.
+    func reorder(_ rawDirs: [String]) {
+        var seen = Set<String>()
+        let listed = rawDirs.map(normalizeDir).filter { seen.insert($0).inserted }.compactMap(account(for:))
+        let rest = accounts.filter { account in !listed.contains { $0 === account } }
+        accounts = listed + rest
+        saveAccounts()
+        onChange?()
     }
 
     func candidates(for provider: Provider) -> [String] {
@@ -716,6 +743,7 @@ final class Monitor {
                     "loading": account.inFlight && account.limits == nil,
                 ]
                 dict["alias"] = account.alias
+                dict["color"] = account.color
                 dict["email"] = account.email
                 dict["plan"] = account.plan
                 dict["limits"] = account.limits?.map(\.dictionary)
