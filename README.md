@@ -4,7 +4,7 @@ A small macOS menu bar app that shows the remaining usage limits of every Claude
 Grok login on your Mac: the 5-hour and 7-day windows, model-specific limits, Grok's weekly pool,
 and exactly when each one resets.
 
-![Three accounts with their 7-day, 5-hour and model limits](docs/screenshot.png)
+![Claude, Codex and Grok accounts with their limits, color dots and aliases](docs/screenshot.png)
 
 - **Menu bar:** one small bar per account, filled to its lowest remaining limit. Green above 50%,
   orange down to 25%, red below that; a solid red bar means the account is currently blocked.
